@@ -42,6 +42,11 @@ app.use((req, res) => {
 // Connect DB & Start Server
 const PORT = process.env.PORT || 5000;
 
+// Guard: fail fast if MONGO_URI is not set
+if (!process.env.MONGO_URI) {
+  throw new Error('❌ MONGO_URI is not defined. Set it in Railway environment variables or a local .env file.');
+}
+
 mongoose.connect(process.env.MONGO_URI)
   .then(() => {
     console.log('✅ MongoDB connected successfully');
@@ -50,7 +55,7 @@ mongoose.connect(process.env.MONGO_URI)
     });
   })
   .catch(err => {
-    console.error('❌ MongoDB connection error:', err.message);
+    console.error('❌ MongoDB connection error:', err);
     process.exit(1);
   });
 

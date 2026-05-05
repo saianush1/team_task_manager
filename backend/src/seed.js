@@ -72,6 +72,11 @@ async function seed() {
   console.log('\n🌱 TaskFlow Demo Seeder');
   console.log('━'.repeat(40));
 
+  // Guard: fail fast if MONGO_URI is not set
+  if (!process.env.MONGO_URI) {
+    throw new Error('❌ MONGO_URI is not defined. Set it in your .env file before running the seed script.');
+  }
+
   await mongoose.connect(process.env.MONGO_URI);
   console.log('✅ Connected to MongoDB\n');
 
@@ -169,7 +174,7 @@ async function seed() {
 }
 
 seed().catch(err => {
-  console.error('❌ Seed failed:', err.message);
+  console.error('❌ Seed failed:', err);
   mongoose.disconnect();
   process.exit(1);
 });
