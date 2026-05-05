@@ -1,7 +1,7 @@
 /**
  * One-time Setup/Reset Endpoint
- * POST /api/setup   { key: "setup-taskflow-2024" }
- * Wipes all data and seeds: 1 admin + 5 members + 3 projects + 12 tasks
+ * POST /api/setup         { key: "setup-taskflow-2024" }  → wipe & seed everything
+ * POST /api/setup/reset   { key: "setup-taskflow-2024" }  → just reset admin password
  */
 
 const express = require('express');
@@ -10,6 +10,7 @@ const { pool } = require('../db');
 const User = require('../models/User');
 const Project = require('../models/Project');
 const Task = require('../models/Task');
+const bcrypt = require('bcryptjs');
 
 const SETUP_KEY = 'setup-taskflow-2024';
 
@@ -136,6 +137,28 @@ router.post('/', async (req, res) => {
   } catch (err) {
     console.error('Setup error:', err);
     res.status(500).json({ success: false, message: 'Setup failed.', detail: err.message });
+  }
+});
+
+// ── Quick admin password reset ────────────────────────────────────────────────
+router.post('/reset', async (req, res) => {
+  const { key } = req.body;
+  if (key !== SETUP_KEY) {
+    return res.status(403).json({ success: false, message: 'Invalid setup key.' });
+  }
+  try {
+    const salt = await bcrypt.genSalt(12);
+    const hashed = await bcrypt.hash('admin@123', salt);
+    const { rowCount } = await pool.query(
+      `UPDATE users SET password = $1, role = 'admin', updated_at = NOW() WHERE email = $2`,
+      [hashed, 'admin@taskflow.dev']
+    );
+    if (rowCount === 0) {
+      return res.status(404).json({ success: false, message: 'admin@taskflow.dev not found in DB.' });
+    }
+    res.json({ success: true, message: '✅ Admin password reset to admin@123. Login now!' });
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'Reset failed.', detail: err.message });
   }
 });
 
