@@ -33,11 +33,11 @@ router.post('/signup', [
     }
 
     // SINGLE ADMIN RULE: Only first user ever becomes admin
-    const userCount = await User.countDocuments();
+    const userCount = await User.count();
     const assignedRole = userCount === 0 ? 'admin' : 'member';
 
     const user = await User.create({ name, email, password, role: assignedRole });
-    const token = generateToken(user._id);
+    const token = generateToken(user.id);
 
     res.status(201).json({
       success: true,
@@ -64,17 +64,21 @@ router.post('/login', [
 
   try {
     const { email, password } = req.body;
-    const user = await User.findOne({ email });
-    if (!user) {
+
+    // findOne returns raw row with password
+    const rawUser = await User.findOne({ email });
+    if (!rawUser) {
       return res.status(401).json({ success: false, message: 'Invalid email or password' });
     }
 
-    const isMatch = await user.comparePassword(password);
+    const isMatch = await User.comparePassword(password, rawUser.password);
     if (!isMatch) {
       return res.status(401).json({ success: false, message: 'Invalid email or password' });
     }
 
-    const token = generateToken(user._id);
+    const token = generateToken(rawUser.id);
+    // Return formatted user (no password)
+    const user = await User.findById(rawUser.id);
     res.json({ success: true, message: 'Login successful', token, user });
   } catch (error) {
     console.error('Login error:', error);

@@ -1,5 +1,4 @@
 const express = require('express');
-const mongoose = require('mongoose');
 const cors = require('cors');
 const dotenv = require('dotenv');
 
@@ -22,7 +21,7 @@ app.use('/api/users', require('./routes/users'));
 
 // Health check
 app.get('/api/health', (req, res) => {
-  res.json({ status: 'OK', message: 'Team Task Manager API running', timestamp: new Date() });
+  res.json({ status: 'OK', message: 'Team Task Manager API running (PostgreSQL)', timestamp: new Date() });
 });
 
 // Global error handler
@@ -42,20 +41,20 @@ app.use((req, res) => {
 // Connect DB & Start Server
 const PORT = process.env.PORT || 5000;
 
-// Guard: fail fast if MONGO_URI is not set
-if (!process.env.MONGO_URI) {
-  throw new Error('❌ MONGO_URI is not defined. Set it in Railway environment variables or a local .env file.');
+if (!process.env.DATABASE_URL) {
+  throw new Error('❌ DATABASE_URL is not defined. Set it in Railway environment variables or a local .env file.');
 }
 
-mongoose.connect(process.env.MONGO_URI)
+const { initDB } = require('./db');
+
+initDB()
   .then(() => {
-    console.log('✅ MongoDB connected successfully');
     app.listen(PORT, () => {
       console.log(`🚀 Server running on port ${PORT}`);
     });
   })
   .catch(err => {
-    console.error('❌ MongoDB connection error:', err);
+    console.error('❌ PostgreSQL connection/init error:', err);
     process.exit(1);
   });
 

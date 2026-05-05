@@ -1,6 +1,6 @@
 const express = require('express');
 const User = require('../models/User');
-const { protect, requireAdmin } = require('../middleware/auth');
+const { protect } = require('../middleware/auth');
 
 const router = express.Router();
 
@@ -10,11 +10,11 @@ router.get('/me', protect, async (req, res) => {
 });
 
 // @route   GET /api/users
-// @desc    Get all users (admin sees all, member sees all for display purposes)
+// @desc    Get all users
 // @access  Private
 router.get('/', protect, async (req, res) => {
   try {
-    const users = await User.find().sort({ createdAt: -1 });
+    const users = await User.findAll();
     res.json({ success: true, data: users });
   } catch (error) {
     res.status(500).json({ success: false, message: 'Server error' });
@@ -27,10 +27,7 @@ router.get('/', protect, async (req, res) => {
 router.put('/me', protect, async (req, res) => {
   try {
     const { name, avatar } = req.body;
-    const user = await User.findById(req.user._id);
-    if (name) user.name = name;
-    if (avatar !== undefined) user.avatar = avatar;
-    await user.save();
+    const user = await User.update(req.user.id, { name, avatar });
     res.json({ success: true, message: 'Profile updated', data: user });
   } catch (error) {
     res.status(500).json({ success: false, message: 'Server error' });

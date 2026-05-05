@@ -1,5 +1,5 @@
 /**
- * Demo Seed Script — TaskFlow
+ * Demo Seed Script — TaskFlow (PostgreSQL)
  * Creates: 5 members + 3 projects + 12 tasks
  *
  * Usage: node src/seed.js
@@ -8,12 +8,10 @@
  */
 
 require('dotenv').config();
-const mongoose = require('mongoose');
+const { initDB } = require('./db');
 const User = require('./models/User');
 const Project = require('./models/Project');
 const Task = require('./models/Task');
-
-const COLORS = ['#7c3aed', '#10b981', '#f59e0b', '#38bdf8', '#f97316', '#ec4899'];
 
 const DEMO_MEMBERS = [
   { name: 'Alice Johnson', email: 'alice@taskflow.dev', password: 'member123' },
@@ -69,23 +67,25 @@ const DEMO_TASKS = {
 };
 
 async function seed() {
-  console.log('\n🌱 TaskFlow Demo Seeder');
+  console.log('\n🌱 TaskFlow Demo Seeder (PostgreSQL)');
   console.log('━'.repeat(40));
 
-  // Guard: fail fast if MONGO_URI is not set
-  if (!process.env.MONGO_URI) {
-    throw new Error('❌ MONGO_URI is not defined. Set it in your .env file before running the seed script.');
+  if (!process.env.DATABASE_URL) {
+    throw new Error('❌ DATABASE_URL is not defined. Set it in your .env file before running the seed script.');
   }
 
-  await mongoose.connect(process.env.MONGO_URI);
-  console.log('✅ Connected to MongoDB\n');
+  await initDB();
+  console.log('✅ Connected to PostgreSQL\n');
 
   // Find admin
-  const admin = await User.findOne({ role: 'admin' });
-  if (!admin) {
+  const { pool } = require('./db');
+  const { rows: adminRows } = await pool.query(`SELECT * FROM users WHERE role = 'admin' LIMIT 1`);
+  const adminRaw = adminRows[0];
+  if (!adminRaw) {
     console.error('❌ No admin found! Register the first user via the app, then run this script.');
     process.exit(1);
   }
+  const admin = { id: adminRaw.id, name: adminRaw.name, email: adminRaw.email };
   console.log(`👑 Admin found: ${admin.name} (${admin.email})\n`);
 
   // Create demo members (skip if email already exists)
@@ -107,18 +107,18 @@ async function seed() {
   console.log('\n📁 Creating demo projects...');
   const createdProjects = {};
   for (const p of DEMO_PROJECTS) {
-    const existing = await Project.findOne({ title: p.title });
-    if (existing) {
+    const { rows: existingRows } = await pool.query('SELECT id FROM projects WHERE title = $1 LIMIT 1', [p.title]);
+    if (existingRows.length > 0) {
       console.log(`   ⏭  "${p.title}" already exists`);
-      createdProjects[p.title] = existing;
+      createdProjects[p.title] = await Project.findById(existingRows[0].id);
       continue;
     }
-    const memberIds = p.memberNames.map(n => createdMembers[n]?._id).filter(Boolean);
+    const memberIds = p.memberNames.map(n => createdMembers[n]?.id).filter(Boolean);
     const project = await Project.create({
       title: p.title, description: p.description,
       status: p.status, color: p.color,
-      owner: admin._id,
-      members: [admin._id, ...memberIds]
+      owner_id: admin.id,
+      memberIds
     });
     createdProjects[p.title] = project;
     console.log(`   ✅ Created: "${p.title}" (${memberIds.length} members assigned)`);
@@ -133,12 +133,15 @@ async function seed() {
     const project = createdProjects[projectTitle];
     if (!project) continue;
 
-    const freshProject = await Project.findById(project._id).populate('members', '_id');
-    const assignees = freshProject.members.map(m => m._id);
+    const freshProject = await Project.findById(project.id);
+    const assigneeIds = freshProject.members.map(m => m.id);
 
     for (const t of tasks) {
-      const existing = await Task.findOne({ title: t.title, project: project._id });
-      if (existing) {
+      const { rows: existingTask } = await pool.query(
+        'SELECT id FROM tasks WHERE title = $1 AND project_id = $2 LIMIT 1',
+        [t.title, project.id]
+      );
+      if (existingTask.length > 0) {
         console.log(`   ⏭  Task "${t.title}" already exists`);
         continue;
       }
@@ -147,14 +150,14 @@ async function seed() {
 
       await Task.create({
         title: t.title, description: t.description,
-        project: project._id,
-        assignees,          // assigned to ALL project members
-        creator: admin._id,
+        projectId: project.id,
+        assigneeIds,
+        creatorId: admin.id,
         status: t.status,
         priority: t.priority,
         dueDate
       });
-      console.log(`   ✅ [${projectTitle}] "${t.title}" → ${assignees.length} assignees, status: ${t.status}`);
+      console.log(`   ✅ [${projectTitle}] "${t.title}" → ${assigneeIds.length} assignees, status: ${t.status}`);
       taskCount++;
     }
   }
@@ -169,12 +172,12 @@ async function seed() {
   DEMO_MEMBERS.forEach(m => console.log(`   ${m.name.padEnd(16)}: ${m.email} / ${m.password}`));
   console.log('');
 
-  await mongoose.disconnect();
+  const { pool: p2 } = require('./db');
+  await p2.end();
   process.exit(0);
 }
 
 seed().catch(err => {
   console.error('❌ Seed failed:', err);
-  mongoose.disconnect();
   process.exit(1);
 });

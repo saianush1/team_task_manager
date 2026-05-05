@@ -12,39 +12,29 @@ const handleValidation = (req, res) => {
   return null;
 };
 
-const POPULATE_TASK = [
-  { path: 'assignees', select: 'name email avatar' },
-  { path: 'creator', select: 'name email' },
-  { path: 'project', select: 'title color' }
-];
-
 // @route   GET /api/tasks/dashboard
 // @desc    Dashboard stats + recent/overdue tasks for current user
 // @access  Private
 router.get('/dashboard', protect, async (req, res) => {
   try {
     const isAdmin = req.user.role === 'admin';
-    // Admin sees all tasks; member sees tasks they are assigned to
-    const baseQuery = isAdmin ? {} : { assignees: req.user._id };
-    const now = new Date();
+    const assigneeId = isAdmin ? null : req.user.id;
 
     const [total, todo, inProgress, done, overdue] = await Promise.all([
-      Task.countDocuments(baseQuery),
-      Task.countDocuments({ ...baseQuery, status: 'todo' }),
-      Task.countDocuments({ ...baseQuery, status: 'in-progress' }),
-      Task.countDocuments({ ...baseQuery, status: 'done' }),
-      Task.countDocuments({ ...baseQuery, status: { $ne: 'done' }, dueDate: { $lt: now } })
+      Task.count({ assigneeId }),
+      Task.count({ assigneeId, status: 'todo' }),
+      Task.count({ assigneeId, status: 'in-progress' }),
+      Task.count({ assigneeId, status: 'done' }),
+      Task.count({ assigneeId, notStatus: 'done', overdue: true })
     ]);
 
-    const recentTasks = await Task.find(baseQuery)
-      .populate(POPULATE_TASK)
-      .sort({ updatedAt: -1 }).limit(5);
+    const recentTasks = await Task.findRecent({ assigneeId, limit: 5 });
+    const overdueTasks = await Task.findOverdue({ assigneeId, limit: 5 });
 
-    const overdueTasks = await Task.find({
-      ...baseQuery, status: { $ne: 'done' }, dueDate: { $lt: now }
-    }).populate(POPULATE_TASK).sort({ dueDate: 1 }).limit(5);
-
-    res.json({ success: true, data: { stats: { total, todo, inProgress, done, overdue }, recentTasks, overdueTasks } });
+    res.json({
+      success: true,
+      data: { stats: { total, todo, inProgress, done, overdue }, recentTasks, overdueTasks }
+    });
   } catch (error) {
     console.error('Dashboard error:', error);
     res.status(500).json({ success: false, message: 'Server error' });
@@ -56,28 +46,26 @@ router.get('/dashboard', protect, async (req, res) => {
 // @access  Private
 router.get('/', protect, async (req, res) => {
   try {
-    let query = {};
     const isAdmin = req.user.role === 'admin';
+    const filter = {};
 
     if (req.query.projectId) {
-      const project = await Project.findById(req.query.projectId);
+      const projectId = parseInt(req.query.projectId, 10);
+      const project = await Project.findById(projectId);
       if (!project) return res.status(404).json({ success: false, message: 'Project not found' });
-      if (!isAdmin && !project.members.some(m => m.equals(req.user._id))) {
+      const isMember = await Project.isMember(projectId, req.user.id);
+      if (!isAdmin && !isMember) {
         return res.status(403).json({ success: false, message: 'Access denied' });
       }
-      query.project = req.query.projectId;
-    } else {
-      // Admin: all tasks; Member: only tasks they're assigned to
-      if (!isAdmin) query.assignees = req.user._id;
+      filter.projectId = projectId;
+    } else if (!isAdmin) {
+      filter.assigneeId = req.user.id;
     }
 
-    if (req.query.status) query.status = req.query.status;
-    if (req.query.priority) query.priority = req.query.priority;
+    if (req.query.status) filter.status = req.query.status;
+    if (req.query.priority) filter.priority = req.query.priority;
 
-    const tasks = await Task.find(query)
-      .populate(POPULATE_TASK)
-      .sort({ createdAt: -1 });
-
+    const tasks = await Task.find(filter);
     res.json({ success: true, data: tasks });
   } catch (error) {
     console.error('Get tasks error:', error);
@@ -88,7 +76,7 @@ router.get('/', protect, async (req, res) => {
 // @route   GET /api/tasks/:id
 router.get('/:id', protect, async (req, res) => {
   try {
-    const task = await Task.findById(req.params.id).populate(POPULATE_TASK);
+    const task = await Task.findById(req.params.id);
     if (!task) return res.status(404).json({ success: false, message: 'Task not found' });
     res.json({ success: true, data: task });
   } catch {
@@ -111,22 +99,29 @@ router.post('/', protect, requireAdmin, [
 
   try {
     const { title, description, projectId, status, priority, dueDate, tags } = req.body;
+    const projectIdInt = parseInt(projectId, 10);
 
-    const project = await Project.findById(projectId).populate('members', '_id name');
+    const project = await Project.findById(projectIdInt);
     if (!project) return res.status(404).json({ success: false, message: 'Project not found' });
 
     // Auto-assign to ALL project members
-    const assignees = project.members.map(m => m._id);
+    const assigneeIds = project.members.map(m => m.id);
 
     const task = await Task.create({
-      title, description, project: projectId,
-      assignees,           // <-- all members
-      creator: req.user._id,
-      status, priority, dueDate: dueDate || null, tags
+      title, description,
+      projectId: projectIdInt,
+      assigneeIds,
+      creatorId: req.user.id,
+      status, priority,
+      dueDate: dueDate || null,
+      tags: tags || []
     });
 
-    const populated = await Task.findById(task._id).populate(POPULATE_TASK);
-    res.status(201).json({ success: true, message: `Task created & assigned to ${assignees.length} member(s)`, data: populated });
+    res.status(201).json({
+      success: true,
+      message: `Task created & assigned to ${assigneeIds.length} member(s)`,
+      data: task
+    });
   } catch (error) {
     console.error('Create task error:', error);
     res.status(500).json({ success: false, message: 'Server error' });
@@ -138,29 +133,24 @@ router.post('/', protect, requireAdmin, [
 // @access  Private
 router.put('/:id', protect, async (req, res) => {
   try {
-    const task = await Task.findById(req.params.id);
+    const taskId = parseInt(req.params.id, 10);
+    const task = await Task.findById(taskId);
     if (!task) return res.status(404).json({ success: false, message: 'Task not found' });
 
     const isAdmin = req.user.role === 'admin';
-    const isAssignee = task.assignees.some(a => a.equals(req.user._id));
+    const isAssignee = await Task.isAssignee(taskId, req.user.id);
 
     if (!isAdmin && !isAssignee) return res.status(403).json({ success: false, message: 'Access denied' });
 
+    let updated;
     if (isAdmin) {
       const { title, description, status, priority, dueDate, tags } = req.body;
-      if (title) task.title = title;
-      if (description !== undefined) task.description = description;
-      if (status) task.status = status;
-      if (priority) task.priority = priority;
-      if (dueDate !== undefined) task.dueDate = dueDate || null;
-      if (tags) task.tags = tags;
+      updated = await Task.update(taskId, { title, description, status, priority, dueDate, tags });
     } else {
-      if (req.body.status) task.status = req.body.status;
+      updated = await Task.updateStatus(taskId, req.body.status);
     }
 
-    await task.save();
-    const populated = await Task.findById(task._id).populate(POPULATE_TASK);
-    res.json({ success: true, message: 'Task updated', data: populated });
+    res.json({ success: true, message: 'Task updated', data: updated });
   } catch {
     res.status(500).json({ success: false, message: 'Server error' });
   }
@@ -175,19 +165,19 @@ router.patch('/:id/status', protect, [
   if (ve) return;
 
   try {
-    const task = await Task.findById(req.params.id);
+    const taskId = parseInt(req.params.id, 10);
+    const task = await Task.findById(taskId);
     if (!task) return res.status(404).json({ success: false, message: 'Task not found' });
 
     const isAdmin = req.user.role === 'admin';
-    const isAssignee = task.assignees.some(a => a.equals(req.user._id));
+    const isAssignee = await Task.isAssignee(taskId, req.user.id);
 
     if (!isAdmin && !isAssignee) {
       return res.status(403).json({ success: false, message: 'Only assignees or admin can update status' });
     }
 
-    task.status = req.body.status;
-    await task.save();
-    res.json({ success: true, message: 'Status updated', data: task });
+    const updated = await Task.updateStatus(taskId, req.body.status);
+    res.json({ success: true, message: 'Status updated', data: updated });
   } catch {
     res.status(500).json({ success: false, message: 'Server error' });
   }
@@ -196,9 +186,10 @@ router.patch('/:id/status', protect, [
 // @route   DELETE /api/tasks/:id (admin only)
 router.delete('/:id', protect, requireAdmin, async (req, res) => {
   try {
-    const task = await Task.findById(req.params.id);
+    const taskId = parseInt(req.params.id, 10);
+    const task = await Task.findById(taskId);
     if (!task) return res.status(404).json({ success: false, message: 'Task not found' });
-    await task.deleteOne();
+    await Task.delete(taskId);
     res.json({ success: true, message: 'Task deleted' });
   } catch {
     res.status(500).json({ success: false, message: 'Server error' });

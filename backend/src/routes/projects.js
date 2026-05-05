@@ -16,27 +16,22 @@ const handleValidation = (req, res) => {
 };
 
 // @route   GET /api/projects
-// @desc    Get projects. Admin: all. Member: member-of + all others (can see to request join)
 // @access  Private
 router.get('/', protect, async (req, res) => {
   try {
-    const projects = await Project.find()
-      .populate('owner', 'name email avatar')
-      .populate('members', 'name email avatar role')
-      .populate('joinRequests.user', 'name email avatar')
-      .sort({ createdAt: -1 });
+    const projects = await Project.findAll();
 
     const projectsWithMeta = await Promise.all(projects.map(async (project) => {
-      const taskCount = await Task.countDocuments({ project: project._id });
-      const completedCount = await Task.countDocuments({ project: project._id, status: 'done' });
-      const isMember = project.members.some(m => m._id.equals(req.user._id));
-      const myRequest = project.joinRequests.find(r => r.user && r.user._id && r.user._id.equals(req.user._id));
+      const taskCount = await Project.taskCount(project.id);
+      const completedCount = await Project.completedTaskCount(project.id);
+      const isMember = project.members.some(m => m.id === req.user.id);
+      const myJoinStatus = await Project.myJoinStatus(project.id, req.user.id);
       return {
-        ...project.toJSON(),
+        ...project,
         taskCount,
         completedCount,
         isMember,
-        myJoinStatus: myRequest ? myRequest.status : null
+        myJoinStatus
       };
     }));
 
@@ -52,26 +47,7 @@ router.get('/', protect, async (req, res) => {
 // @access  Admin
 router.get('/pending-requests', protect, requireAdmin, async (req, res) => {
   try {
-    const projects = await Project.find({ 'joinRequests.status': 'pending' })
-      .populate('joinRequests.user', 'name email avatar')
-      .select('title color joinRequests');
-
-    const requests = [];
-    projects.forEach(project => {
-      project.joinRequests
-        .filter(r => r.status === 'pending')
-        .forEach(r => {
-          requests.push({
-            projectId: project._id,
-            projectTitle: project.title,
-            projectColor: project.color,
-            requestId: r._id,
-            user: r.user,
-            requestedAt: r.requestedAt
-          });
-        });
-    });
-
+    const requests = await Project.getPendingRequestsAcrossProjects();
     res.json({ success: true, data: requests, count: requests.length });
   } catch (error) {
     res.status(500).json({ success: false, message: 'Server error' });
@@ -82,11 +58,7 @@ router.get('/pending-requests', protect, requireAdmin, async (req, res) => {
 // @access  Private
 router.get('/:id', protect, async (req, res) => {
   try {
-    const project = await Project.findById(req.params.id)
-      .populate('owner', 'name email avatar')
-      .populate('members', 'name email avatar role')
-      .populate('joinRequests.user', 'name email avatar');
-
+    const project = await Project.findById(req.params.id);
     if (!project) {
       return res.status(404).json({ success: false, message: 'Project not found' });
     }
@@ -112,15 +84,11 @@ router.post('/', protect, requireAdmin, [
 
     const project = await Project.create({
       title, description, status, color,
-      owner: req.user._id,
-      members: members || []
+      owner_id: req.user.id,
+      memberIds: members || []
     });
 
-    const populated = await Project.findById(project._id)
-      .populate('owner', 'name email avatar')
-      .populate('members', 'name email avatar role');
-
-    res.status(201).json({ success: true, message: 'Project created', data: populated });
+    res.status(201).json({ success: true, message: 'Project created', data: project });
   } catch (error) {
     console.error('Create project error:', error);
     res.status(500).json({ success: false, message: 'Server error' });
@@ -131,22 +99,13 @@ router.post('/', protect, requireAdmin, [
 // @access  Admin
 router.put('/:id', protect, requireAdmin, async (req, res) => {
   try {
-    const project = await Project.findById(req.params.id);
-    if (!project) return res.status(404).json({ success: false, message: 'Project not found' });
+    const existing = await Project.findById(req.params.id);
+    if (!existing) return res.status(404).json({ success: false, message: 'Project not found' });
 
     const { title, description, status, color } = req.body;
-    if (title) project.title = title;
-    if (description !== undefined) project.description = description;
-    if (status) project.status = status;
-    if (color) project.color = color;
+    const project = await Project.update(req.params.id, { title, description, status, color });
 
-    await project.save();
-
-    const populated = await Project.findById(project._id)
-      .populate('owner', 'name email avatar')
-      .populate('members', 'name email avatar role');
-
-    res.json({ success: true, message: 'Project updated', data: populated });
+    res.json({ success: true, message: 'Project updated', data: project });
   } catch (error) {
     res.status(500).json({ success: false, message: 'Server error' });
   }
@@ -159,8 +118,8 @@ router.delete('/:id', protect, requireAdmin, async (req, res) => {
     const project = await Project.findById(req.params.id);
     if (!project) return res.status(404).json({ success: false, message: 'Project not found' });
 
-    await Task.deleteMany({ project: project._id });
-    await project.deleteOne();
+    await Task.deleteByProject(project.id);
+    await Project.delete(project.id);
     res.json({ success: true, message: 'Project and all tasks deleted' });
   } catch (error) {
     res.status(500).json({ success: false, message: 'Server error' });
@@ -180,29 +139,22 @@ router.post('/:id/members', protect, requireAdmin, [
     const project = await Project.findById(req.params.id);
     if (!project) return res.status(404).json({ success: false, message: 'Project not found' });
 
-    const user = await User.findById(req.body.userId);
+    const userId = parseInt(req.body.userId, 10);
+    const user = await User.findById(userId);
     if (!user) return res.status(404).json({ success: false, message: 'User not found' });
 
-    const alreadyMember = project.members.some(m => m.equals(req.body.userId));
+    const alreadyMember = await Project.isMember(project.id, userId);
     if (alreadyMember) return res.status(400).json({ success: false, message: 'User is already a member' });
 
-    project.members.push(req.body.userId);
+    await Project.addMember(project.id, userId);
 
     // Auto-accept any pending join request from this user
-    const reqIdx = project.joinRequests.findIndex(r => r.user.equals(req.body.userId) && r.status === 'pending');
-    if (reqIdx !== -1) {
-      project.joinRequests[reqIdx].status = 'accepted';
-      project.joinRequests[reqIdx].resolvedAt = new Date();
-    }
+    await Project.resolveJoinRequest(project.id, userId, 'accepted');
 
-    await project.save();
-
-    const populated = await Project.findById(project._id)
-      .populate('owner', 'name email avatar')
-      .populate('members', 'name email avatar role');
-
+    const populated = await Project.findById(project.id);
     res.json({ success: true, message: `${user.name} added to project`, data: populated });
   } catch (error) {
+    console.error('Add member error:', error);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });
@@ -215,13 +167,12 @@ router.delete('/:id/members/:userId', protect, requireAdmin, async (req, res) =>
     const project = await Project.findById(req.params.id);
     if (!project) return res.status(404).json({ success: false, message: 'Project not found' });
 
-    if (project.owner.equals(req.params.userId)) {
+    const userId = parseInt(req.params.userId, 10);
+    if (project.owner.id === userId) {
       return res.status(400).json({ success: false, message: 'Cannot remove project owner' });
     }
 
-    project.members = project.members.filter(m => !m.equals(req.params.userId));
-    await project.save();
-
+    await Project.removeMember(project.id, userId);
     res.json({ success: true, message: 'Member removed from project' });
   } catch (error) {
     res.status(500).json({ success: false, message: 'Server error' });
@@ -240,21 +191,15 @@ router.post('/:id/join-request', protect, async (req, res) => {
     const project = await Project.findById(req.params.id);
     if (!project) return res.status(404).json({ success: false, message: 'Project not found' });
 
-    const alreadyMember = project.members.some(m => m.equals(req.user._id));
+    const alreadyMember = await Project.isMember(project.id, req.user.id);
     if (alreadyMember) return res.status(400).json({ success: false, message: 'You are already a member' });
 
-    const existingRequest = project.joinRequests.find(r =>
-      r.user.equals(req.user._id) && r.status === 'pending'
-    );
-    if (existingRequest) {
+    const hasPending = await Project.hasPendingRequest(project.id, req.user.id);
+    if (hasPending) {
       return res.status(400).json({ success: false, message: 'Join request already pending' });
     }
 
-    // Remove any old rejected request before adding new one
-    project.joinRequests = project.joinRequests.filter(r => !r.user.equals(req.user._id));
-    project.joinRequests.push({ user: req.user._id, status: 'pending' });
-    await project.save();
-
+    await Project.addJoinRequest(project.id, req.user.id);
     res.json({ success: true, message: 'Join request sent! Waiting for admin approval.' });
   } catch (error) {
     console.error('Join request error:', error);
@@ -263,31 +208,25 @@ router.post('/:id/join-request', protect, async (req, res) => {
 });
 
 // @route   PUT /api/projects/:id/join-request/:userId/accept
-// @desc    Admin accepts a join request
 // @access  Admin
 router.put('/:id/join-request/:userId/accept', protect, requireAdmin, async (req, res) => {
   try {
     const project = await Project.findById(req.params.id);
     if (!project) return res.status(404).json({ success: false, message: 'Project not found' });
 
-    const requestIdx = project.joinRequests.findIndex(
-      r => r.user.equals(req.params.userId) && r.status === 'pending'
-    );
-    if (requestIdx === -1) {
+    const userId = parseInt(req.params.userId, 10);
+    const hasPending = await Project.hasPendingRequest(project.id, userId);
+    if (!hasPending) {
       return res.status(404).json({ success: false, message: 'Pending request not found' });
     }
 
-    project.joinRequests[requestIdx].status = 'accepted';
-    project.joinRequests[requestIdx].resolvedAt = new Date();
-
-    // Add to members if not already there
-    if (!project.members.some(m => m.equals(req.params.userId))) {
-      project.members.push(req.params.userId);
+    await Project.resolveJoinRequest(project.id, userId, 'accepted');
+    const alreadyMember = await Project.isMember(project.id, userId);
+    if (!alreadyMember) {
+      await Project.addMember(project.id, userId);
     }
 
-    await project.save();
-
-    const user = await User.findById(req.params.userId).select('name email');
+    const user = await User.findById(userId);
     res.json({ success: true, message: `${user.name} has been added to the project!` });
   } catch (error) {
     res.status(500).json({ success: false, message: 'Server error' });
@@ -295,25 +234,20 @@ router.put('/:id/join-request/:userId/accept', protect, requireAdmin, async (req
 });
 
 // @route   PUT /api/projects/:id/join-request/:userId/reject
-// @desc    Admin rejects a join request
 // @access  Admin
 router.put('/:id/join-request/:userId/reject', protect, requireAdmin, async (req, res) => {
   try {
     const project = await Project.findById(req.params.id);
     if (!project) return res.status(404).json({ success: false, message: 'Project not found' });
 
-    const requestIdx = project.joinRequests.findIndex(
-      r => r.user.equals(req.params.userId) && r.status === 'pending'
-    );
-    if (requestIdx === -1) {
+    const userId = parseInt(req.params.userId, 10);
+    const hasPending = await Project.hasPendingRequest(project.id, userId);
+    if (!hasPending) {
       return res.status(404).json({ success: false, message: 'Pending request not found' });
     }
 
-    project.joinRequests[requestIdx].status = 'rejected';
-    project.joinRequests[requestIdx].resolvedAt = new Date();
-    await project.save();
-
-    const user = await User.findById(req.params.userId).select('name');
+    await Project.resolveJoinRequest(project.id, userId, 'rejected');
+    const user = await User.findById(userId);
     res.json({ success: true, message: `Request from ${user.name} rejected.` });
   } catch (error) {
     res.status(500).json({ success: false, message: 'Server error' });
