@@ -49,11 +49,7 @@ router.post('/signup', [
     });
   } catch (error) {
     console.error('Signup error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Server error during signup',
-      detail: error.message   // temporary — remove after debugging
-    });
+    res.status(500).json({ success: false, message: 'Server error during signup' });
   }
 });
 
@@ -86,11 +82,7 @@ router.post('/login', [
     res.json({ success: true, message: 'Login successful', token, user });
   } catch (error) {
     console.error('Login error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Server error during login',
-      detail: error.message   // temporary — remove after debugging
-    });
+    res.status(500).json({ success: false, message: 'Server error during login' });
   }
 });
 

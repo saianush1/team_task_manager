@@ -1,6 +1,8 @@
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
 
+const JWT_SECRET = process.env.JWT_SECRET || 'taskmanager_super_secret_jwt_key_2024';
+
 // Protect routes — verify JWT
 const protect = async (req, res, next) => {
   try {
@@ -12,7 +14,7 @@ const protect = async (req, res, next) => {
       return res.status(401).json({ success: false, message: 'Access denied. No token provided.' });
     }
 
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    const decoded = jwt.verify(token, JWT_SECRET);
     const user = await User.findById(decoded.id);
     if (!user) {
       return res.status(401).json({ success: false, message: 'User not found. Token invalid.' });
@@ -35,7 +37,7 @@ const requireAdmin = (req, res, next) => {
 
 // Generate JWT
 const generateToken = (id) => {
-  return jwt.sign({ id }, process.env.JWT_SECRET, { expiresIn: '7d' });
+  return jwt.sign({ id }, JWT_SECRET, { expiresIn: '7d' });
 };
 
 module.exports = { protect, requireAdmin, generateToken };
